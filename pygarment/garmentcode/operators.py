@@ -468,6 +468,66 @@ def even_armhole_openings(front_opening, back_opening, tol=1e-2, verbose: bool =
 
 
 # ANCHOR ----- Curve tools -----
+# NOTE: fast (vectorized) evaluation of cubic Bezier properties.
+# curve_match_tangents() runs a scipy optimization that calls the objective
+# thousands of times, and svgpathtools' adaptive length() plus per-point
+# curvature() used to take ~90% of the pattern generation time
+_GL_NODES, _GL_WEIGHTS = np.polynomial.legendre.leggauss(24)
+# NOTE: composite quadrature (4 panels) -- a single panel loses accuracy where
+# |B'(t)| is close to zero (near-cusp curves)
+_GL_EDGES = np.linspace(0.0, 1.0, 5)
+_a = _GL_EDGES[:-1][:, None]
+_b = _GL_EDGES[1:][:, None]
+_GL_T = (0.5 * (_b - _a) * (_GL_NODES[None, :] + 1.0) + _a).ravel()
+_GL_W = (0.5 * (_b - _a) * _GL_WEIGHTS[None, :]).ravel()
+
+
+def _bezier_stats(control, n_curvature=70):
+    """Length, max curvature and unit endpoint tangents of a cubic Bezier
+
+        Vectorized (numpy) equivalent of the svgpathtools calls used in
+        _bend_extend_2_tangent -- same formulas, but ~20x faster
+    """
+    p = np.asarray(control, dtype=float)
+
+    # B'(t) and B''(t) as polynomial coefficients in increasing powers of t.
+    # NOTE: the Bezier control points have to be converted to the power basis
+    # first: B(t) = p0 + a1*t + a2*t**2 + a3*t**3
+    a1 = 3.0 * (p[1] - p[0])
+    a2 = 3.0 * (p[0] - 2.0 * p[1] + p[2])
+    a3 = -p[0] + 3.0 * p[1] - 3.0 * p[2] + p[3]
+    d1 = np.array([a1, 2.0 * a2, 3.0 * a3])
+    d2 = np.array([2.0 * a2, 6.0 * a3])
+
+    # Length: Gauss-Legendre quadrature of |B'(t)| (smooth for a cubic)
+    speed = np.hypot(
+        d1[0, 0] + _GL_T * (d1[1, 0] + _GL_T * d1[2, 0]),
+        d1[0, 1] + _GL_T * (d1[1, 1] + _GL_T * d1[2, 1]))
+    length = float(_GL_W @ speed)
+
+    # Max curvature on the same grid svgpathtools uses
+    t = np.linspace(0, 1, n_curvature)
+    dx = d1[0, 0] + t * (d1[1, 0] + t * d1[2, 0])
+    dy = d1[0, 1] + t * (d1[1, 1] + t * d1[2, 1])
+    ddx = d2[0, 0] + t * d2[1, 0]
+    ddy = d2[0, 1] + t * d2[1, 1]
+    denom = (dx * dx + dy * dy) ** 1.5
+    max_curvature = float(
+        np.max(np.abs(dx * ddy - dy * ddx) / np.maximum(denom, 1e-300)))
+
+    # Unit tangents at the endpoints (as complex numbers)
+    def _unit_tangent(vx, vy):
+        n = np.hypot(vx, vy)
+        return complex(vx, vy) / n if n > 1e-300 else complex(0, 0)
+
+    tan_start = _unit_tangent(d1[0, 0], d1[0, 1])
+    tan_end = _unit_tangent(
+        d1[0, 0] + d1[1, 0] + d1[2, 0],
+        d1[0, 1] + d1[1, 1] + d1[2, 1])
+
+    return length, max_curvature, tan_start, tan_end
+
+
 def _avg_curvature(curve, points_estimates=100):
     """Average curvature in a curve"""
     # NOTE: this work slow, but direct evaluation seems
@@ -505,17 +565,18 @@ def _bend_extend_2_tangent(
         cp[-1] + direction * shift[4]
     ])
 
-    params = control[:, 0] + 1j*control[:, 1]
-    curve_inverse = svgpath.CubicBezier(*params)
+    # NOTE: vectorized (numpy) evaluation -- see _bezier_stats()
+    curve_length, curve_max_curvature, tan_0, tan_1 = _bezier_stats(
+        control, n_curvature=point_estimates)
 
-    length_diff = (curve_inverse.length() - target_len)**2  # preservation
+    length_diff = (curve_length - target_len)**2  # preservation
 
-    tan_0_diff = (abs(curve_inverse.unit_tangent(0) - target_tangent_start))**2
-    tan_1_diff = (abs(curve_inverse.unit_tangent(1) - target_tangent_end))**2
+    tan_0_diff = (abs(tan_0 - target_tangent_start))**2
+    tan_1_diff = (abs(tan_1 - target_tangent_end))**2
 
     # NOTE: tried regularizing based on Y value in relative coordinates (for speed), 
     # But it doesn't produce good results
-    curvature_reg = _max_curvature(curve_inverse, points_estimates=point_estimates)**2
+    curvature_reg = curve_max_curvature**2
 
     end_expantion_reg = 0.001*shift[-1]**2 
 

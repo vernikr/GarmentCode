@@ -5,6 +5,7 @@
 import yaml
 import traceback
 import threading
+import json
 from datetime import datetime
 from argparse import Namespace
 import numpy as np
@@ -92,6 +93,12 @@ class GUIState:
         # and each of them would be many times slower
         self._drape_lock = threading.Lock()
         self.ui_drape_button = None
+        # Draping progress -- the worker reports it into this file
+        self._drape_running = False
+        self._drape_progress_path = Path('./tmp_gui/drape_progress.json')
+        self.ui_drape_progress = None
+        self.ui_drape_status = None
+        ui.timer(0.5, self._poll_drape_progress)
 
         self.pattern_state.reload_garment()
         self.stylings()
@@ -414,8 +421,16 @@ class GUIState:
 
             self.ui_drape_button = ui.button('Drape current design', on_click=lambda: self.update_3d_scene())
 
+            with ui.column().classes('p-0 m-0 gap-0 items-center'):
+                self.ui_drape_progress = ui.linear_progress(
+                    value=0, show_value=False
+                ).classes('w-40')
+                self.ui_drape_status = ui.label('').classes('text-xs text-stone-500')
+            self.ui_drape_progress.visible = False
+            self.ui_drape_status.visible = False
+
             ui.label(
-                'INFO: it takes a few minutes'
+                'INFO: about a minute'
             ).classes(f'font-semibold text-[{theme_colors.primary}] border-[{theme_colors.primary}] '
                     'border py-0 px-1.5 rounded-md')
 
@@ -678,7 +693,18 @@ class GUIState:
             ui.notify('Current garment is empty. Chose a design to start simulating!')
             self.ui_body_3d.visible(True)
             self.ui_body_3d_switch.set_value(True)
+            self._drape_lock.release()  # NOTE: don't keep the lock on an early return
             return
+
+        # Show the progress bar -- the worker writes the progress into a file
+        self._drape_progress_path.unlink(missing_ok=True)
+        self._drape_running = True
+        if self.ui_drape_progress is not None:
+            self.ui_drape_progress.visible = True
+            self.ui_drape_progress.set_value(0)
+        if self.ui_drape_status is not None:
+            self.ui_drape_status.visible = True
+            self.ui_drape_status.set_text('Starting...')
 
         try:
             if self.ui_drape_button is not None:
@@ -720,8 +746,32 @@ class GUIState:
         finally:
             if self.ui_drape_button is not None:
                 self.ui_drape_button.enable()
+            self._drape_running = False
+            if self.ui_drape_progress is not None:
+                self.ui_drape_progress.visible = False
+            if self.ui_drape_status is not None:
+                self.ui_drape_status.visible = False
             self._drape_lock.release()
     
+    def _poll_drape_progress(self):
+        """Show the draping progress reported by gui/drape_worker.py"""
+        if not self._drape_running or self.ui_drape_progress is None:
+            return
+        try:
+            state = json.loads(self._drape_progress_path.read_text())
+        except (FileNotFoundError, ValueError):
+            return
+        percent = float(state.get('percent', 0))
+        stage_text = {
+            'box_mesh': 'Generating the mesh',
+            'sim': 'Simulating',
+            'export': 'Exporting',
+            'done': 'Done',
+            'error': 'Failed',
+        }.get(state.get('stage'), 'Draping')
+        self.ui_drape_progress.set_value(percent / 100)
+        self.ui_drape_status.set_text(f'{stage_text}... {percent:.0f}%')
+
     def _sync_update_3d(self):
         """Update 3d model"""
 
