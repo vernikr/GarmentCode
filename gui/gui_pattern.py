@@ -13,7 +13,12 @@ from assets.garment_programs.meta_garment import MetaGarment
 from assets.bodies.body_params import BodyParameters
 import pygarment as pyg
 from pygarment.meshgen.boxmeshgen import BoxMesh
-from pygarment.meshgen.simulation import run_sim
+try:
+    from pygarment.meshgen.simulation import run_sim
+    SIMULATION_AVAILABLE = True
+except ImportError:   # NVIDIA Warp (GarmentCode fork) is not installed -- 2D only mode
+    run_sim = None
+    SIMULATION_AVAILABLE = False
 import pygarment.data_config as data_config
 from pygarment.meshgen.sim_config import PathCofig
 
@@ -198,6 +203,12 @@ class GUIPattern:
     # 3D
     def drape_3d(self):
         """Run the draping of the current frame"""
+
+        if run_sim is None:
+            raise RuntimeError(
+                "3D draping requires NVIDIA Warp (GarmentCode fork), which is not installed. "
+                "See docs/Installation.md -> Installing simulator"
+            )
 
         # Config setup 
         props = data_config.Properties('./assets/Sim_props/gui_sim_props.yaml')   # TODOLOW Parameter?
