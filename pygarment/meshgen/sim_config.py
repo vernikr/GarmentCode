@@ -108,7 +108,9 @@ class SimConfig:
 
         # Basic setup
         self.sim_fps = 60.0
-        self.sim_substeps = 10 #increase?
+        # NOTE: solver substeps per frame. Warp's CPU backend has no GPU and no TBB,
+        # so it runs single-threaded: lowering this is one of the main speed levers
+        self.sim_substeps = int(self.get_sim_props_value(sim_props, 'sim_substeps', 10))
         self.sim_wo_gravity_percentage = 0
         self.zero_gravity_steps = self.get_sim_props_value(sim_props, 'zero_gravity_steps', 5)
         self.resolution_scale = self.get_sim_props_value(sim_props, 'resolution_scale', 1.0)

@@ -1,4 +1,7 @@
 from pathlib import Path
+import json
+import subprocess
+import sys
 import time
 import yaml
 import shutil 
@@ -24,6 +27,9 @@ from pygarment.meshgen.sim_config import PathCofig
 
 verbose = False
 
+# Marker used by gui/drape_worker.py to report its result on stdout
+RESULT_PREFIX = 'GARMENTCODE_RESULT '
+
 def _id_generator(size=10, chars=string.ascii_uppercase + string.digits):
         """Generate a random string of a given size, see
         https://stackoverflow.com/questions/2257441/random-string-generation-with-upper-case-letters-and-digits
@@ -44,6 +50,7 @@ class GUIPattern:
         self.saved_garment_folder = ''
         self.tmp_path = self.tmp_path_root / self.id 
         self.paths_3d = None
+        self.drape_out_el = None
 
         # create paths
         self.save_path.mkdir(parents=True, exist_ok=True)
@@ -196,12 +203,70 @@ class GUIPattern:
             self.saved_garment_archive = ''
 
     def clear_3d(self):
-        if self.paths_3d is not None:
-            shutil.rmtree(self.paths_3d.out_el)
-            self.paths_3d = None
+        # NOTE: with subprocess draping there is no PathCofig object,
+        # so the output folder is tracked separately
+        out_el = None
+        if self.drape_out_el is not None:
+            out_el = self.drape_out_el
+        elif self.paths_3d is not None:
+            out_el = self.paths_3d.out_el
+        if out_el is not None:
+            shutil.rmtree(out_el, ignore_errors=True)
+        self.drape_out_el = None
+        self.paths_3d = None
 
     # 3D
-    def drape_3d(self):
+    def _drape_in_subprocess(self, timeout: int = 1800):
+        """Run the draping in a separate process
+
+            See gui/drape_worker.py for why: POSIX timers (signal.alarm) and
+            OpenGL/matplotlib calls need the main thread, and a crash there
+            must not take the web interface down
+        """
+        worker = Path(__file__).resolve().parent / 'drape_worker.py'
+        requests_dir = Path(self.save_path) / 'drape_requests'
+        requests_dir.mkdir(parents=True, exist_ok=True)
+
+        # Body to drape on: the GUI fits the design to the mean body
+        body_dir = requests_dir / f'body_{self.id}'
+        body_dir.mkdir(parents=True, exist_ok=True)
+        self.default_body_params.save(body_dir)
+
+        request = dict(
+            cwd=str(Path.cwd()),
+            name='Configured_design',
+            design=self.design_params,
+            body_file=str(body_dir / 'body_measurements.yaml'),
+            out_dir=str(self.save_path / 'drape_3d'),
+            props_file=str(Path.cwd() / 'assets' / 'Sim_props' / 'gui_sim_props.yaml'),
+            render=False,
+        )
+        request_path = requests_dir / f'request_{self.id}.json'
+        with open(request_path, 'w') as f:
+            json.dump(request, f, default=str)
+
+        process = subprocess.run(
+            [sys.executable, str(worker), str(request_path)],
+            capture_output=True, text=True, timeout=timeout, cwd=str(Path.cwd()))
+
+        result = None
+        for line in (process.stdout or '').splitlines():
+            if line.startswith(RESULT_PREFIX):
+                result = json.loads(line[len(RESULT_PREFIX):])
+
+        if result is None or result.get('status') != 'ok':
+            if result is not None and result.get('status') == 'busy':
+                raise RuntimeError('Draping is already running -- please wait for it to finish')
+            log = '\n'.join(((process.stderr or '') + (process.stdout or '')).splitlines()[-20:])
+            raise RuntimeError('Draping failed:\n' + log)
+
+        self.drape_out_el = Path(result['out_el'])
+        self.is_in_3D = True
+        print(f"Draping finished: {result.get('frames')} frames in {result.get('sim_time')} s")
+
+        return self.drape_out_el, result['glb_name']
+
+    def drape_3d(self, in_subprocess: bool = True):
         """Run the draping of the current frame"""
 
         if run_sim is None:
@@ -209,6 +274,11 @@ class GUIPattern:
                 "3D draping requires NVIDIA Warp (GarmentCode fork), which is not installed. "
                 "See docs/Installation.md -> Installing simulator"
             )
+
+        if in_subprocess:
+            # Separate process: signal-based frame timeouts and OpenGL/matplotlib
+            # need the main thread
+            return self._drape_in_subprocess()
 
         # Config setup 
         props = data_config.Properties('./assets/Sim_props/gui_sim_props.yaml')   # TODOLOW Parameter?
@@ -249,7 +319,10 @@ class GUIPattern:
             save_v_norms=False,
             store_usd=False,  # NOTE: False for fast simulation!, 
             optimize_storage=False,
-            verbose=False
+            verbose=False,
+            # NOTE: The GUI runs draping in a worker thread, where OpenGL rendering
+            # (pyrender) aborts the process on macOS. The GUI only needs the mesh itself
+            render=False
         )
 
         # Convert to displayable element

@@ -1,3 +1,10 @@
+import os
+
+# NOTE: GarmentCode builds UV textures with matplotlib. Its default MacOSX backend creates
+# an NSWindow, which macOS only allows on the main thread -- while the GUI drapes in a worker
+# thread. Force a headless backend BEFORE anything imports matplotlib.pyplot.
+os.environ.setdefault('MPLBACKEND', 'Agg')
+
 from nicegui import ui, Client
 
 # Custom

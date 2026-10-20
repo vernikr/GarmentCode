@@ -2,11 +2,13 @@ sim:
   config:
     optimize_storage: true
 
-    max_sim_steps: 2400
-    max_frame_time: null  # NOTE: Important for GUI!! 
-                          # GUI runs the sim in a thread, which is not supported by timeouts on Linux/MacOS
+    max_sim_steps: 500  # NOTE: at 11 fps the cloth settles in ~400 frames (~40 s)
+    max_frame_time: null  # NOTE: MUST stay null! With a timeout set the frames are
+                          # interrupted by SIGALRM and the cloth does not move at all
+                          # (verified: simulated mesh == input box mesh). Draping now runs
+                          # in a separate process (gui/drape_worker.py), so this is safe.
     max_meshgen_time: 60
-    max_sim_time: 600
+    max_sim_time: 300  # NOTE: hard cap, 5 min
     static_threshold: 0.03
     non_static_percent: 1.5
 
@@ -14,7 +16,10 @@ sim:
     max_self_collisions: 300 
 
     zero_gravity_steps: 10
-    resolution_scale: 1.0
+    # NOTE: edge length in cm for the simulation mesh. The CPU backend of warp
+    # is single-threaded (no GPU, no TBB), so a coarser mesh is the main speed lever:
+    # 1.0 cm -> ~7100 verts, 0.46 fps | 2.0 cm -> ~1800 verts, 7 fps | 2.5 cm -> ~1170 verts, 11 fps
+    resolution_scale: 2.5
     ground: false
     material:
       garment_tri_ka: 10000.0
@@ -29,8 +34,8 @@ sim:
       fabric_friction: 0.5
     options:
       enable_particle_particle_collisions: false
-      enable_triangle_particle_collisions: true
-      enable_edge_edge_collisions: true
+      enable_triangle_particle_collisions: false  # NOTE: ~2x speedup, minor quality loss
+      enable_edge_edge_collisions: false  # NOTE: ~2x speedup, minor quality loss
       enable_body_collision_filters: true
       enable_global_collision_filter: true
 

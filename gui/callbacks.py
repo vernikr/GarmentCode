@@ -4,6 +4,7 @@
 
 import yaml
 import traceback
+import threading
 from datetime import datetime
 from argparse import Namespace
 import numpy as np
@@ -87,6 +88,10 @@ class GUIState:
         self.ui_design_subtabs = {}
         self.ui_pattern_display = None
         self._async_executor = ThreadPoolExecutor(1)  
+        # NOTE: only one draping at a time -- several copies would fight for the CPU
+        # and each of them would be many times slower
+        self._drape_lock = threading.Lock()
+        self.ui_drape_button = None
 
         self.pattern_state.reload_garment()
         self.stylings()
@@ -407,7 +412,7 @@ class GUIState:
                 on_change=lambda e: body_visibility(e.value) 
             ).props('dense left-label').classes('text-stone-800')
 
-            ui.button('Drape current design', on_click=lambda: self.update_3d_scene())
+            self.ui_drape_button = ui.button('Drape current design', on_click=lambda: self.update_3d_scene())
 
             ui.label(
                 'INFO: it takes a few minutes'
@@ -662,6 +667,12 @@ class GUIState:
             self.ui_garment_3d.delete()
             self.ui_garment_3d = None
         
+        if not self._drape_lock.acquire(blocking=False):
+            ui.notify(
+                'Draping is already running -- please wait for it to finish',
+                type='warning', close_button=True, position='center')
+            return
+
         if not self.pattern_state.svg_filename:
             print('INFO::Current garment is empty, skipped 3D update')
             ui.notify('Current garment is empty. Chose a design to start simulating!')
@@ -670,6 +681,8 @@ class GUIState:
             return
 
         try:
+            if self.ui_drape_button is not None:
+                self.ui_drape_button.disable()
             # Display waiting spinner untill getting the result
             # NOTE Splashscreen solution to block users from modifying params while updating
             # https://github.com/zauberzeug/nicegui/discussions/1988
@@ -704,6 +717,10 @@ class GUIState:
                 close_button=True,
                 position='center'
             )
+        finally:
+            if self.ui_drape_button is not None:
+                self.ui_drape_button.enable()
+            self._drape_lock.release()
     
     def _sync_update_3d(self):
         """Update 3d model"""

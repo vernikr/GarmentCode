@@ -164,7 +164,8 @@ def run_sim(
         cloth_name, props, paths: PathCofig, 
         save_v_norms=False, store_usd=False, 
         optimize_storage=False,
-        verbose=False): 
+        verbose=False,
+        render=True): 
     """Initialize and run the simulation
     !! Important !! 
         'store_usd' parameter slows down the simulation to CPU rates because of required CPU-GPU copies and file writes. Use only for debugging
@@ -243,11 +244,17 @@ def run_sim(
     garment.save_frame(save_v_norms=save_v_norms) #saving after stats
 
     # Render images
-    s_time = time.time()
-    render_images(paths, garment.v_body, garment.f_body, render_props['config'])
-    render_image_time = time.time() - s_time
-    render_props['stats']['render_time'][cloth_name] = render_image_time  
-    print(f"Rendering {cloth_name} took {render_image_time}s")
+    # NOTE: rendering goes through pyrender/OpenGL, which on macOS has to be called
+    # from the main thread -- otherwise the process aborts with an NSException.
+    # Callers that run the simulation in a worker thread (e.g. the GUI) pass render=False
+    if render:
+        s_time = time.time()
+        render_images(paths, garment.v_body, garment.f_body, render_props['config'])
+        render_image_time = time.time() - s_time
+        render_props['stats']['render_time'][cloth_name] = render_image_time  
+        print(f"Rendering {cloth_name} took {render_image_time}s")
+    else:
+        print(f"Rendering {cloth_name} skipped (render=False)")
 
     if optimize_storage:
         optimize_garment_storage(paths)
